@@ -914,6 +914,112 @@ class GameManagerEncodingTests(unittest.TestCase):
             bytes(host_writer.data),
         )
 
+    def _lobby_with_stranger(self):
+        """Two lobbies: host+member in one, a stranger hosting another."""
+        writers = [FakeWriter() for _ in range(3)]
+        host, member, stranger = (
+            server.ClientSession(
+                writers[i], ("127.0.0.1", i + 1), ("192.168.1.%d" % (20 + i), 5000 + i),
+                server.PlayerProfile(1000001 + i, 1000001 + i, "P%d" % i, "192.168.1.%d" % (20 + i)),
+            ) for i in range(3)
+        )
+        game = server.create_game_record(host, b"\x00", connected_host=True)
+        server.add_session_to_game(game, member, b"\x00")
+        server.create_game_record(stranger, b"\x00", connected_host=True)
+        return game, host, member, stranger, writers
+
+    def test_outsiders_and_members_cannot_run_host_lobby_commands(self):
+        async def run_test():
+            game, host, member, stranger, writers = self._lobby_with_stranger()
+            gid = server.tdf_int_field("GID", game.game_id)
+            member_pid = member.profile.persona_id
+            attempts = (
+                (stranger, 0x0002, gid + b"\x00"),
+                (member, 0x0002, gid + b"\x00"),
+                (stranger, 0x000B, gid + server.tdf_int_field("PID", member_pid) + b"\x00"),
+                (member, 0x001B, gid + server.tdf_int_list("PLST", (host.profile.persona_id,)) + b"\x00"),
+                (member, 0x0017, gid + server.tdf_int_field("HOST", member_pid) + b"\x00"),
+                (member, 0x006A, gid + server.tdf_int_field("PID", member_pid) + b"\x00"),
+                (stranger, 0x0027, gid + server.tdf_string_field("GNAM", "pwned") + b"\x00"),
+                (member, 0x0008, gid + server.tdf_int_field("PID", host.profile.persona_id) +
+                 server.encode_tag("ATTR", 0x05) + b"\x01\x01\x00" + b"\x00"),
+            )
+            replies = []
+            for session, command, request in attempts:
+                for writer in writers:
+                    writer.data.clear()
+                await server.handle_game_manager_request(
+                    session, command, 1, request, session.client_peer
+                )
+                own = writers[[host, member, stranger].index(session)]
+                others = [w for w in writers if w is not own]
+                replies.append((bytes(own.data), [bytes(w.data) for w in others]))
+            return game, host, member, replies
+
+        game, host, member, replies = asyncio.run(run_test())
+        self.assertIn(game.game_id, server.ACTIVE_GAMES)
+        self.assertEqual(set(game.members), {host.profile.persona_id, member.profile.persona_id})
+        self.assertEqual(game.host_id, host.profile.persona_id)
+        self.assertEqual(game.admins, {host.profile.persona_id})
+        self.assertEqual(game.banned_players, set())
+        self.assertNotEqual(game.name, "pwned")
+        for own, others in replies:
+            self.assertEqual(own[6:8], b"\x00\x02")  # INVALID_GAME_ID error
+            self.assertEqual(others, [b"", b""])  # nobody else was notified
+
+    def test_member_can_leave_and_admin_can_run_host_commands(self):
+        async def run_test():
+            game, host, member, stranger, writers = self._lobby_with_stranger()
+            gid = server.tdf_int_field("GID", game.game_id)
+            await server.handle_game_manager_request(
+                host, 0x006A, 1, gid + server.tdf_int_field("PID", member.profile.persona_id) + b"\x00",
+                host.client_peer,
+            )
+            await server.handle_game_manager_request(
+                member, 0x0027, 2, gid + server.tdf_string_field("GNAM", "Admin Lobby") + b"\x00",
+                member.client_peer,
+            )
+            await server.handle_game_manager_request(
+                member, 0x000B, 3, gid + server.tdf_int_field("PID", member.profile.persona_id) + b"\x00",
+                member.client_peer,
+            )
+            await asyncio.sleep(0.1)
+            return game, member, writers[1]
+
+        game, member, member_writer = asyncio.run(run_test())
+        self.assertEqual(game.name, "Admin Lobby")
+        self.assertNotIn(member.profile.persona_id, game.members)
+        self.assertNotIn(b"\x00\x04\x00\x0b\x00\x02", bytes(member_writer.data))
+
+    def test_team_index_is_bounded_without_changing_state(self):
+        async def run_test():
+            game, host, member, stranger, writers = self._lobby_with_stranger()
+            results = []
+            for msg_id, index in enumerate((server.MAX_TEAM_SLOTS - 1, server.MAX_TEAM_SLOTS,
+                                            0xFFFFFFFF, 2), 1):
+                before = list(game.team_ids)
+                writers[0].data.clear()
+                await server.handle_game_manager_request(
+                    host, 0x006D, msg_id,
+                    server.tdf_int_field("GID", game.game_id) +
+                    server.tdf_int_field("NTID", 5) +
+                    server.tdf_int_field("TIDX", index) + b"\x00",
+                    host.client_peer,
+                )
+                results.append((index, before, list(game.team_ids), bytes(writers[0].data)))
+            return results
+
+        results = asyncio.run(run_test())
+        (_, _, last_slot, ok), (_, before_big, after_big, err), (_, before_huge, after_huge, err2), \
+            (_, _, after_valid, ok2) = results
+        self.assertEqual(len(last_slot), server.MAX_TEAM_SLOTS)
+        self.assertEqual(ok[6:8], b"\x00\x00")
+        for before, after, reply in ((before_big, after_big, err), (before_huge, after_huge, err2)):
+            self.assertEqual(before, after)
+            self.assertEqual(reply[6:8], b"\x00\x02")
+        self.assertEqual(after_valid[2], 5)
+        self.assertEqual(ok2[6:8], b"\x00\x00")
+
     def test_explicit_host_migration_changes_setup_host(self):
         async def run_test():
             host_writer = FakeWriter()

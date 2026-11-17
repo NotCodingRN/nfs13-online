@@ -2026,6 +2026,37 @@ async def broadcast_game_list_update(games=(), removed=()):
             pass
 
 
+# Who may run each lobby command against an existing game.  Retail logs show
+# non-hosts only send matchmaking, mesh reports and their own leave.
+LOBBY_HOST_COMMANDS = {
+    0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x000F, 0x0013, 0x0017,
+    0x001A, 0x001B, 0x001F, 0x0020, 0x0027, 0x006A, 0x006B, 0x006D, 0x006E,
+}
+LOBBY_MEMBER_COMMANDS = {0x001D, 0x0021}  # mesh reports (may name others), ban list read
+LOBBY_PLAYER_COMMANDS = {0x0008, 0x000B, 0x0012, 0x0016, 0x006C}  # self, or host/admin for others
+MAX_TEAM_SLOTS = 16  # changeGameTeamId list index bound; retail uses a handful
+
+
+def lobby_permission_error(session, command, payload):
+    """Return a Blaze error if the sender may not run this lobby command, else 0."""
+    if command not in LOBBY_HOST_COMMANDS | LOBBY_MEMBER_COMMANDS | LOBBY_PLAYER_COMMANDS:
+        return 0
+    game = ACTIVE_GAMES.get(find_tdf_int(payload, "GID", session.game_id))
+    if game is None:
+        return 0  # each handler already ignores a missing game
+    actor = session.profile.persona_id
+    if actor in game.members:
+        if command in LOBBY_MEMBER_COMMANDS:
+            return 0
+        if (command in LOBBY_PLAYER_COMMANDS and
+                find_tdf_int(payload, "PID", actor) == actor):
+            return 0
+        if actor == game.host_id or actor in game.admins:
+            return 0
+    # The client already handles INVALID_GAME_ID; it reveals nothing extra.
+    return 2
+
+
 async def handle_game_manager_request(session, command, msg_id, payload, peer):
     """Handle NFS13 GameManager RPCs and complete the setup notification flow."""
     writer = session.writer
@@ -2050,8 +2081,12 @@ async def handle_game_manager_request(session, command, msg_id, payload, peer):
     destroyed_game = None
     member_notifications = []
     removals = []
-    response_error = 0
-    if command == 0x0068:  # getMatchmakingConfig
+    response_error = lobby_permission_error(session, command, payload)
+    if response_error:
+        log.warning("[GAME MANAGER] denied %s from persona %d", command_name,
+                    profile.persona_id)
+        payload_out = b""
+    elif command == 0x0068:  # getMatchmakingConfig
         payload_out = make_matchmaking_config_response()
     elif command == 0x000D:  # startMatchmaking
         matchmaking_session_id = allocate_matchmaking_id()
@@ -2445,7 +2480,9 @@ async def handle_game_manager_request(session, command, msg_id, payload, peer):
         game = ACTIVE_GAMES.get(game_id)
         team_index = find_tdf_int(payload, "TIDX", 0)
         new_team_id = find_tdf_int(payload, "NTID", 0xFFFF)
-        if game is not None:
+        if game is not None and not 0 <= team_index < MAX_TEAM_SLOTS:
+            response_error = 2
+        elif game is not None:
             while len(game.team_ids) <= team_index:
                 game.team_ids.append(0xFFFF)
             old_team_id = game.team_ids[team_index]
