@@ -2,20 +2,20 @@
 import datetime
 import json
 import os
-import subprocess
 import sys
 import time
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from cloud import Cloud, run, aws_executable
+from cloud import Cloud, run
 from ui import DATA, ROOT, Window, tk
 from admin_layout import Page, ButtonRow, fit_window, scroll_table, wrap_labels
 from sharing import player_pack
+from wizard import Wizard, REGIONS
 
 
-def main():
+def main(auto_setup=True):
     win = Window("Fairhaven • Server control", "Server control")
     fit_window(win.root)
     ttk.Style(win.root).map("TButton", foreground=[("disabled", "#adb8c3")])
@@ -49,7 +49,7 @@ def main():
             connection_fields.append((row, col, caption, widget))
         return widget
     profile_box = field(connection, "AWS profile", profile, 0, values=profiles)
-    region_box = field(connection, "Region", region, 0, 2, ["us-east-1", "eu-west-1", "eu-central-1", "eu-west-2", "ap-south-1", "ap-southeast-1"])
+    region_box = field(connection, "Region", region, 0, 2, [code for code, _ in REGIONS])
     instance_box = field(connection, "Server name", instance, 1)
     field(connection, "SSH key", key, 1, 2)
 
@@ -267,59 +267,22 @@ def main():
 
     setup=pages["Host new server"]
     ttk.Label(setup,text="Build a fresh race server",style="Title.TLabel").pack(anchor="w")
-    ttk.Label(setup,text="1. Choose or configure your AWS profile and region above.\n2. Test access, choose a plan and optionally select a server backup.\n3. Create the server. Setup installs the services, checks connectivity and creates a player ZIP with the new IP.\nIf setup is interrupted, use Resume installation; the saved key is loaded automatically.",style="Muted.TLabel",wraplength=850).pack(anchor="w",pady=8)
-    access=tk.StringVar(value="Region access has not been checked.")
-    ttk.Label(setup,textvariable=access,wraplength=850).pack(anchor="w",pady=6)
-    plans={};plan_value=tk.StringVar();restore_value=tk.StringVar()
-    plan_box=ttk.Combobox(setup,textvariable=plan_value,state="readonly",width=90);plan_box.pack(fill="x",pady=6);win.inputs.append(plan_box)
-    ttk.Label(setup,text="2 GB is the recommended starting plan for one lobby, up to the game's 12-player limit. More RAM adds headroom; 12 simultaneous players have not been load-tested.",style="Muted.TLabel",wraplength=850).pack(anchor="w",pady=5)
-    restore_row=ttk.Frame(setup);restore_row.pack(fill="x",pady=5);restore_row.columnconfigure(1,weight=1)
-    field(restore_row,"Optional server backup",restore_value,0)
-    def choose_restore():
-        path=filedialog.askopenfilename(filetypes=[("Server backup","*.tar.gz")])
-        if path: restore_value.set(path)
-    ttk.Button(restore_row,text="Browse",command=choose_restore).grid(row=0,column=2)
-    tested={"scope":None}
-    def preflight_result(data):
-        tested["scope"]=(profile.get(),region.get())
-        plans.clear()
-        for p in data["bundles"]:
-            label=f"{p['ramSizeInGb']:g} GB RAM / {p['cpuCount']} vCPU   •   ${p['price']:g}/month   •   {p['bundleId']}"
-            plans[label]=p["bundleId"]
-        plan_box.configure(values=list(plans));plan_value.set(next(iter(plans),""))
-        region_box.configure(values=data["regions"])
-        access.set(f"Account {data['account']} • {data['region']}\n{data['permission_note']}\nExisting servers: "+(", ".join(i["name"] for i in data["instances"]) or "None"))
-        win.status.set("Region read access verified; choose a plan")
-    def created(record):
-        key.set(record["key"]);server_ip["value"]=record["ip"];address.set(record["ip"])
-        state.set("Server ready • "+record["instance"]);win.status.set("Ready. Copy the player invite from Server.")
-        client();tabs.select(server_page.page)
-        win.job("Server is live. Creating your player ZIP…",lambda:player_pack(record["ip"],pack_destination(record["ip"])),shared)
-    def shared(path):
-        pack_ready(path)
-        messagebox.showinfo("Your server is live", f"Server IP: {server_ip['value']}\n\nPlayer launcher ZIP:\n{path}\n\nSend this ZIP to your friends. They extract it, choose their game folder and display name, then Play. The IP is already filled in and can be changed later.")
-        os.startfile(Path(path).parent)
-    def create():
-        if tested["scope"]!=(profile.get(),region.get()) or plan_value.get() not in plans:
-            return messagebox.showinfo("Test region first","Test this AWS profile and region before creating a server")
-        plan=plans[plan_value.get()];backup=restore_value.get().strip()
-        try:c=client()
-        except Exception as exc:return messagebox.showerror("Create server",str(exc))
-        confirm("Create paid AWS server",f"Create {instance.get()} in {profile.get()} / {region.get()}?\n{plan_value.get()}\nAWS bills the instance while stopped as well as running. Extra traffic and snapshots can add charges.",lambda:win.job("Starting fresh host setup…",lambda:c.create(plan,win.progress,backup),created))
-    def resume():
-        operation("Resuming server installation…",lambda c:c.resume(win.progress),created)
+    ttk.Label(setup,text="The setup wizard checks the AWS tools, connects your AWS account, finds the fastest region, creates the server and makes the player ZIP. It takes about 5–15 minutes.",style="Muted.TLabel",wraplength=850).pack(anchor="w",pady=8)
+    def finished(record, pack):
+        for var, k in ((profile,"profile"),(region,"region"),(instance,"instance"),(key,"key")): var.set(record[k])
+        client(); server_ip["value"]=record["ip"]; address.set(record["ip"])
+        state.set("Server ready • "+record["instance"]); pack_ready(pack)
+        tabs.select(server_page.page)
+    def open_wizard():
+        saved={"profile":profile.get(),"region":region.get()}
+        Wizard(win.root, saved, finished)
+    def resumed(record):
+        key.set(record["key"]); server_ip["value"]=record["ip"]; address.set(record["ip"])
+        state.set("Server ready • "+record["instance"]); client(); tabs.select(server_page.page)
+        win.job("Creating your player ZIP…",lambda:player_pack(record["ip"],pack_destination(record["ip"])),pack_ready)
     bar=ButtonRow(setup);bar.pack(fill="x",pady=7)
-    button(bar,"Test AWS & region",lambda:operation("Checking AWS account and regional access…",lambda c:c.preflight(),preflight_result),True)
-    button(bar,"Create server",create);button(bar,"Resume installation",resume)
-    def configure_profile():
-        value=profile.get().strip()
-        if not value or value.startswith("-"):return messagebox.showinfo("AWS profile","Enter the name of the AWS profile you want to configure")
-        # This console belongs to the user because AWS setup requires their credentials.
-        subprocess.Popen(["cmd.exe","/k",subprocess.list2cmdline([aws_executable(),"configure","--profile",value])])
-    def sso(): operation("Opening AWS SSO sign-in…",lambda c:run(c.cli[:1]+["sso","login","--profile",profile.get()],timeout=300).decode())
-    bar=ButtonRow(setup);bar.pack(fill="x")
-    button(bar,"Configure AWS profile",configure_profile);button(bar,"Sign in with SSO",sso)
-    button(bar,"Install AWS CLI",lambda:webbrowser.open("https://awscli.amazonaws.com/AWSCLIV2.msi"))
+    button(bar,"Set up a new server",open_wizard,True)
+    button(bar,"Resume installation",lambda:operation("Resuming server installation…",lambda c:c.resume(win.progress),resumed))
     def load_deployment():
         path=filedialog.askopenfilename(initialdir=DATA,filetypes=[("Saved deployment","*-deployment.json")])
         if not path:return
@@ -340,8 +303,19 @@ def main():
     bar=ButtonRow(help_page);bar.pack(fill="x")
     button(bar,"Open app data",lambda:os.startfile(DATA))
     button(bar,"Open AWS console",lambda:webbrowser.open("https://lightsail.aws.amazon.com/"))
+    def check_saved(result):
+        if result == "missing" and messagebox.askyesno("Saved server is gone",
+                f"“{instance.get()}” no longer exists in {profile.get()} / {region.get()}.\n\nSet up a new server now?"):
+            tabs.select(setup.page); open_wizard()
+    def saved_state():
+        try: client().instance(); return "ok"
+        except RuntimeError as exc: return "missing" if "NotFound" in str(exc) or "does not exist" in str(exc) else "unknown"
+        except Exception: return "unknown"
     if "--setup" in sys.argv or not default:
         tabs.select(setup.page)
+        if auto_setup: win.root.after(300, open_wizard)
+    elif auto_setup:
+        win.job("Checking your saved server…", saved_state, check_saved)
     win.root.report_callback_exception=lambda t,v,tb:messagebox.showerror("Fairhaven",str(v))
     win.root.mainloop()
     return win
