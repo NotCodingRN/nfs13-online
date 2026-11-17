@@ -49,6 +49,41 @@ class TicketIdentityTests(unittest.TestCase):
             self.assertEqual(len(server.ACTIVE_SESSIONS), 2)
             self.assertTrue(all(s.authenticated for s in sessions))
 
+    def test_autolog_accepts_the_blaze_login_session_key(self):
+        alex, ticket = self.registry.login("Alex", "a" * 64)
+        class Writer:
+            def __init__(self): self.frames = []
+            def write(self, data): self.frames.append(bytes(data))
+            async def drain(self): pass
+            def get_extra_info(self, name): return ("203.0.113.9", 1)
+            def close(self): pass
+            async def wait_closed(self): pass
+        async def login():
+            writer = Writer()
+            session = server.ClientSession(writer, ("127.0.0.1", 1), ("203.0.113.9", 1000),
+                                           server.PlayerProfile(0, 0, "PendingLogin", ""))
+            await server.handle_auth_request(session, 0x0032, 1,
+                                            server.tdf_string_field("AUTH", ticket), session.client_peer)
+            return b"".join(writer.frames)
+        async def autolog(key):
+            reader = asyncio.StreamReader()
+            reader.feed_data(f"GET /view_model?session={key}&getComponent=MainMap&action=GetData HTTP/1.1\r\n\r\n".encode())
+            writer = Writer()
+            await server.handle_autolog_http(reader, writer)
+            return b"".join(writer.frames)
+        with patch.object(server, "PLAYER_REGISTRY", self.registry), patch.dict(server.ACTIVE_SESSIONS, {}, clear=True):
+            frames = asyncio.run(login())
+            key = next(k for k in self.registry._tickets if k != ticket)
+            self.assertIn(key.encode(), frames)  # the key the game was given
+            with self.assertLogs(server.log, "INFO") as logs:
+                accepted = asyncio.run(autolog(key))
+                refused = asyncio.run(autolog("0" * 32))
+        self.assertIn(b"HasRecommendations", accepted)
+        self.assertIn(b"Invalid or expired launcher ticket", refused)
+        self.assertTrue(any("'session': 'known'" in line for line in logs.output))
+        self.assertTrue(any("refused GET /view_model" in line for line in logs.output))
+        self.assertFalse(any(key in line or ticket in line for line in logs.output))
+
     def test_xp_report_saves_only_the_authenticated_players_total(self):
         alex, _ = self.registry.login("Alex", "a" * 64)
         bob, _ = self.registry.login("Bob", "b" * 64)

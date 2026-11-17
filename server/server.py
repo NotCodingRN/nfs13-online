@@ -117,7 +117,7 @@ class PlayerRegistry:
 
     def login(self, name, credential):
         if not isinstance(name, str) or not PLAYER_NAME_RE.fullmatch(name):
-            raise ValueError("Use 1Ã¢â‚¬â€œ15 letters, numbers, _ or - for your name")
+            raise ValueError("Use 1-15 letters, numbers, _ or - for your name")
         if not isinstance(credential, str) or not re.fullmatch(r"[0-9a-f]{64}", credential):
             raise ValueError("Invalid launcher credential")
         profile = next((p for p in self.all_profiles() if p.name.casefold() == name.casefold()), None)
@@ -143,6 +143,10 @@ class PlayerRegistry:
         ticket = "NF" + secrets.token_hex(12)
         self._tickets[ticket] = (profile.persona_id, now + 24 * 3600)
         return profile, ticket
+
+    def add_session(self, key, persona_id):
+        """Accept the Blaze login session key for Autolog, like the launcher ticket."""
+        self._tickets[key] = (persona_id, time.time() + 24 * 3600)
 
     def from_ticket(self, ticket):
         record = self._tickets.get(ticket)
@@ -2735,6 +2739,8 @@ async def handle_auth_request(session, command, msg_id, payload, peer):
         await writer.drain()
     elif command in (0x0098, 0x0032, 0x003C): # originLogin, silentLogin, expressLogin
         session_key = secrets.token_hex(16)
+        # The client may send this key as the Autolog session once online.
+        PLAYER_REGISTRY.add_session(session_key, profile.persona_id)
         payload_out = (b"\x00" if command == 0x0032 and MINIMAL_SILENT_LOGIN_RESPONSE
                        else make_full_login_response(
                            profile.name, profile.persona_id, profile.account_id,
@@ -3530,7 +3536,8 @@ async def handle_autolog_http(reader, writer):
                     stats["vehicle_id"] = vehicle_id
                     PLAYER_REGISTRY._stats[str(profile.persona_id)] = stats
                     PLAYER_REGISTRY._save()
-        log.info("[AUTOLOG HTTP] %s %s body_len=%d", method, path, len(body_in))
+        shown = {k: (("known" if profile else "unknown") if k == "session" else v[0][:40]) for k, v in query.items()}
+        log.info("[AUTOLOG HTTP] %s %s %s body_len=%d", method, path, shown or "", len(body_in))
         if path.startswith("/admin/") and path != "/admin/status":
             if not peer or peer[0] not in ("127.0.0.1", "::1"):
                 body = b'{"status":"error","message":"local access only"}'
@@ -3552,6 +3559,7 @@ async def handle_autolog_http(reader, writer):
             body = b'{"status":"error","message":"Update the player launcher to use ticket login"}'
         elif ((path == "/view_model" or "session" in query or path.lstrip("/").lower() in FRIEND_PATHS)
               and profile is None):
+            log.warning("[AUTOLOG HTTP] refused %s %s: unknown or expired session", method, path)
             body = b'{"status":"error","message":"Invalid or expired launcher ticket"}'
         elif method == "GET" and path == "/admin/status":
             if peer and peer[0] in ("127.0.0.1", "::1"):
