@@ -1,0 +1,24 @@
+NFS13 Player for Windows
+
+Extract the ZIP and open NFS13Player.exe. Each player uses their own copy.
+
+1. Select the folder containing your own NFS13.exe.
+2. Enter the display name your host expects (1–15 letters, numbers, _ or -).
+3. Check the server IPv4 address (prefilled in host-created ZIPs), or change it.
+4. Confirm that you own the game when prompted. Approve the Windows hosts-file
+   update if asked, then choose online play in the game.
+
+The launcher prepares NFS13.online.exe beside the original game and puts a
+personal login ticket into its Blaze and Autolog requests. Multiple players
+can launch simultaneously on the same Wi-Fi. Identity follows the launcher's
+saved key, so a changed IP does not change your persona.
+
+Keep a backup of %LOCALAPPDATA%\Fairhaven\identities.json to keep your identity
+when moving to another PC. It contains your personal access key; do not share
+it with other players. The server's player-data backup preserves persona IDs,
+credential hashes and reported online XP. Local game saves stay on your PC.
+
+This ticket patch supports the checked retail 1.5 game build. An unsupported
+executable fails before launch instead of falling back to IP identification.
+
+Independent, self-hosted community software. See LICENSE and DISCLAIMER.md.

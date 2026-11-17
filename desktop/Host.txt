@@ -1,0 +1,78 @@
+Fairhaven Private Racing 2.1
+
+Setup offers Host and player (both apps), or Player only for your friends.
+The host component includes the official AWS CLI installer and can enable
+Windows OpenSSH if missing. The apps themselves do not need Python installed.
+Your AWS credentials stay in AWS CLI profiles on your PC.
+
+PLAYER
+Choose the folder containing your original NFS13.exe, enter a display name
+and the host's IPv4 address, then Play. The launcher patches a separate online
+executable and attaches your personal login ticket. Different players sharing
+one Wi-Fi can log in simultaneously. The high-performance GPU option applies
+only to this game. The checked retail 1.5 build is supported.
+
+Use Export player identity before moving PCs. Keep that file private; it is
+the key to your persona. Import it on the new PC, then choose your name.
+Career backup and restore operate on this PC's normal Documents save folder.
+Close the game before using either. Restoring makes a safety backup first.
+
+HOST
+Configure an AWS CLI profile (or sign in with SSO). Select it and a Lightsail
+region, then Test AWS & region. This validates account identity and regional
+read access and lists the available plans and their current monthly prices.
+AWS confirms create permissions, quota and capacity only when you launch.
+
+Enter a new server name and choose a plan. Two GB is the recommended starting
+plan for one lobby, up to the game's 12-player limit. Twelve simultaneous
+players have not been load-tested. Optional: choose a previous server backup.
+Select Create server. Setup creates the SSH key, instance, static IP and game
+firewall rules, then installs the backend and builds its legacy TLS frontend.
+This can take 5-15 minutes. The app remains responsive during installation.
+Deployment settings and SSH keys are saved under %LOCALAPPDATA%\Fairhaven.
+For interrupted setup, select the same profile, region and name, then Resume
+installation. Its saved SSH key is loaded automatically. Load saved deployment
+can also restore the fields when returning later.
+
+Connect to an existing server using its profile, region, instance name and
+SSH key. Refresh status to see its public IP, players and lobbies. Copy player
+invite provides everything friends need; they keep the same launcher.
+After creating a server, setup checks public connectivity and automatically
+creates a player ZIP with its IP filled in, then opens the folder. Share that
+ZIP with friends. Use Export player ZIP to regenerate it at any time. The ZIP
+contains no AWS credentials, SSH keys or player identity files. Its IP stays
+editable. Player ZIPs are under %LOCALAPPDATA%\Fairhaven\PlayerPacks.
+
+PLAYERS AND SAVES
+Load players to inspect every registered persona, its stored online XP, last
+reported vehicle, online/disabled status and portable player backup. Apply
+changes edits its name, stored XP, login access and DLC compatibility flag.
+Edits snapshot the registry before saving and disconnect that player. A later
+game report can raise stored XP again. Player restore requires the player to
+be offline and preserves their credential hash and persona ID.
+
+The DLC control covers the five compatibility vehicle entries already
+supported by this backend. It requires installed game content; it does not
+download DLC, grant ownership or unlock the career garage. Full career saves
+and car ownership remain on each player's PC. Unknown server XP is shown as
+Not reported in the controller until the game sends a real total.
+
+BACKUPS AND AWS COSTS
+Full server backups contain identities, credential hashes, online XP, flags,
+friend roster and plates. Restore makes a local safety backup first. Back up
+and delete instance deletes only after a validated local backup is saved.
+Restore a backup while creating a new server in any supported profile/region.
+The plan is billed even while an instance is stopped. Retained snapshots and
+some extra traffic have separate AWS charges. The app displays prices from
+AWS. A snapshot request starts an AWS operation; it may not be ready instantly.
+
+NETWORKING
+Driving traffic is peer to peer. PCs need to reach one another; strict NAT
+or university networks can require a shared VPN. Management uses SSH, opening
+TCP 22 only to the host PC's current public IP during an operation. The player
+admin API accepts only loopback connections through that SSH channel.
+
+UPDATES AND SOURCE
+Update backend backs up data, installs the bundled backend and restarts it.
+Source, build scripts and licenses are installed beside the apps. Uninstall
+preserves your personal data and does not delete AWS instances or game saves.
