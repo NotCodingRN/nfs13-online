@@ -3723,11 +3723,14 @@ class PeerRelay:
     ordered (sender, receiver) pair in a game gets its own port, so the port
     alone says who sent a packet even when players share one public IP.
     """
+    LOCK_SECONDS = 30  # a learned endpoint can only move after this much silence
+
     def __init__(self, ports):
         self.free = list(ports)
+        random.SystemRandom().shuffle(self.free)  # ports can't be guessed in order
         self.pairs = {}      # (gid, sender, receiver) -> port
         self.owners = {}     # port -> (gid, sender, receiver)
-        self.endpoints = {}  # (gid, persona) -> UDP source address
+        self.endpoints = {}  # (gid, persona) -> (UDP source address, last seen)
         self.sockets = {}    # port -> transport
 
     def port(self, gid, sender, receiver):
@@ -3756,17 +3759,23 @@ class PeerRelay:
         if key is None:
             return
         gid, sender, receiver = key
+        game = ACTIVE_GAMES.get(gid)
         session = ACTIVE_SESSIONS.get(sender)
-        # Only the sender's own public IP may speak for it on this port.
-        if session is None or session.client_peer[0] != addr[0]:
+        # Only current members, and only from the sender's own public IP.
+        if (game is None or sender not in game.members or receiver not in game.members or
+                session is None or session.client_peer[0] != addr[0]):
             return
-        if self.endpoints.get((gid, sender)) != addr:
-            self.endpoints[(gid, sender)] = addr
+        now = time.monotonic()
+        known = self.endpoints.get((gid, sender))
+        if known is not None and known[0] != addr and now - known[1] < self.LOCK_SECONDS:
+            return  # another source port while the learned one is active
+        if known is None or known[0] != addr:
             log.info("[RELAY] gid=%d persona=%d sends from %s:%d", gid, sender, *addr)
+        self.endpoints[(gid, sender)] = (addr, now)
         target = self.endpoints.get((gid, receiver))
-        back = self.port(gid, receiver, sender)
+        back = self.pairs.get((gid, receiver, sender))  # made with the lobby setup
         if target is not None and back in self.sockets:
-            self.sockets[back].sendto(data, target)
+            self.sockets[back].sendto(data, target[0])
 
 
 class RelayProtocol(asyncio.DatagramProtocol):

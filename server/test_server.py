@@ -1060,6 +1060,14 @@ class GameManagerEncodingTests(unittest.TestCase):
             got_b = await asyncio.wait_for(b_in.got.get(), 2)
             b_sock.sendto(b"reply from B", ("127.0.0.1", a_for_b))
             got_a = await asyncio.wait_for(a_in.got.get(), 2)
+            # Another source port can't take over B's slot while B is active.
+            relay.received(a_for_b, b"takeover", ("127.0.0.1", 1))
+            self.assertNotEqual(relay.endpoints[(game.game_id, 1000002)][0], ("127.0.0.1", 1))
+            # Once B leaves the lobby, nothing B sends is forwarded.
+            del game.members[1000002]
+            b_sock.sendto(b"after leaving", ("127.0.0.1", a_for_b))
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(a_in.got.get(), 0.3)
             for t in [a_sock, b_sock, *relay.sockets.values()]: t.close()
             return got_a, got_b, a_for_b, b_for_a
 
