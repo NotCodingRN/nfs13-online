@@ -25,6 +25,9 @@ log = logging.getLogger("blaze")
 # server's LAN or VPN IP before starting it.
 SERVER_HOST = os.environ.get("NFS13_HOST", "127.0.0.1")
 AUTOLOG_URL = f"http://{SERVER_HOST}:8080"
+# UDP ports for relaying driving traffic between players (open them in the firewall).
+RELAY_PORTS = range(3700, 3900)
+RELAY = None  # PeerRelay, started in main()
 
 
 # Latin only: the client's handling of other name encodings is untested.
@@ -1222,6 +1225,17 @@ def make_network_address_field(tag: str, raw_address=None) -> bytes:
     return _fallback_network_address(tag)
 
 
+def peer_address(game, viewer_id, member):
+    """The address `viewer_id` should send peer traffic to for `member`."""
+    member_id = member.session.profile.persona_id
+    if RELAY is None or game is None or viewer_id == member_id:
+        return member.session.network_addr
+    port = RELAY.port(game.game_id, viewer_id, member_id)
+    if port is None:  # every relay port busy: let the players try directly
+        return member.session.network_addr
+    return _fallback_network_address("ADDR", int(ipaddress.IPv4Address(SERVER_HOST)), port)
+
+
 def make_host_network_list(raw_address=None) -> bytes:
     """Encode NFS13's list-of-group representation of NetworkAddress."""
     address = make_network_address_field("PNET", raw_address)
@@ -1320,6 +1334,8 @@ def make_game_setup_notification_payload(request_payload=b"", game_id=1,
     request_address = (find_tdf_field(request_payload, "PNET", 0x06) or
                        find_tdf_field(request_payload, "HNET", 0x06) or
                        raw_address)
+    if roster and game_record is not None and recipient_id != host_member.session.profile.persona_id:
+        request_address = peer_address(game_record, recipient_id, host_member) or request_address
     version = (find_tdf_string(request_payload, "GVER") or
                find_tdf_string(request_payload, "VSTR") or
                "nfs-2013-pc")
@@ -1393,7 +1409,7 @@ def make_game_setup_notification_payload(request_payload=b"", game_id=1,
         roster_payloads = [
             make_replicated_game_player(
                 game_id,
-                member.session.network_addr,
+                peer_address(game_record, recipient_id, member),
                 member.player_attrs,
                 member.session.profile.persona_id,
                 member.session.profile.name,
@@ -1571,10 +1587,10 @@ def find_matchmaking_game(session: ClientSession):
     return None
 
 
-def make_player_joining_payload(game: GameRecord, member: GameMember) -> bytes:
+def make_player_joining_payload(game: GameRecord, member: GameMember, viewer_id=None) -> bytes:
     player = make_replicated_game_player(
         game.game_id,
-        member.session.network_addr,
+        peer_address(game, viewer_id, member),
         member.player_attrs,
         member.session.profile.persona_id,
         member.session.profile.name,
@@ -1757,7 +1773,7 @@ async def announce_joining_member(game: GameRecord, newcomer: GameMember):
         )
         await send_notification(
             member.session, 0x0004, 0x0015,
-            make_player_joining_payload(game, newcomer),
+            make_player_joining_payload(game, newcomer, member.session.profile.persona_id),
         )
 
 
@@ -2690,7 +2706,7 @@ async def handle_game_manager_request(session, command, msg_id, payload, peer):
                 if member.session is session:
                     continue
                 writer.write(make_blaze_notification(
-                    0x0004, 0x0018, make_player_joining_payload(game, member)
+                    0x0004, 0x0018, make_player_joining_payload(game, member, profile.persona_id)
                 ))
                 await writer.drain()
                 log.info("[GAME MANAGER TX] NotifyPlayerPromotedFromQueue gid=%d "
@@ -3699,6 +3715,71 @@ class QosUdpProtocol(asyncio.DatagramProtocol):
         log.info("QoS UDP Reply to %s (%d bytes):\n%s", addr, len(response), hexdump(response))
 
 
+class PeerRelay:
+    """Forward driving traffic between players through this server.
+
+    Players behind one VPN, or on networks that isolate devices, cannot reach
+    each other directly, so each is told the other is at this server.  Every
+    ordered (sender, receiver) pair in a game gets its own port, so the port
+    alone says who sent a packet even when players share one public IP.
+    """
+    def __init__(self, ports):
+        self.free = list(ports)
+        self.pairs = {}      # (gid, sender, receiver) -> port
+        self.owners = {}     # port -> (gid, sender, receiver)
+        self.endpoints = {}  # (gid, persona) -> UDP source address
+        self.sockets = {}    # port -> transport
+
+    def port(self, gid, sender, receiver):
+        key = (gid, sender, receiver)
+        if key not in self.pairs:
+            if not self.free:
+                self.collect()
+            if not self.free:
+                return None
+            port = self.free.pop(0)
+            self.pairs[key], self.owners[port] = port, key
+        return self.pairs[key]
+
+    def collect(self):
+        """Free ports of games or players that are gone."""
+        for key, port in list(self.pairs.items()):
+            game = ACTIVE_GAMES.get(key[0])
+            if game is None or key[1] not in game.members or key[2] not in game.members:
+                del self.pairs[key], self.owners[port]
+                self.free.append(port)
+        self.endpoints = {k: v for k, v in self.endpoints.items()
+                          if k[0] in ACTIVE_GAMES and k[1] in ACTIVE_GAMES[k[0]].members}
+
+    def received(self, port, data, addr):
+        key = self.owners.get(port)
+        if key is None:
+            return
+        gid, sender, receiver = key
+        session = ACTIVE_SESSIONS.get(sender)
+        # Only the sender's own public IP may speak for it on this port.
+        if session is None or session.client_peer[0] != addr[0]:
+            return
+        if self.endpoints.get((gid, sender)) != addr:
+            self.endpoints[(gid, sender)] = addr
+            log.info("[RELAY] gid=%d persona=%d sends from %s:%d", gid, sender, *addr)
+        target = self.endpoints.get((gid, receiver))
+        back = self.port(gid, receiver, sender)
+        if target is not None and back in self.sockets:
+            self.sockets[back].sendto(data, target)
+
+
+class RelayProtocol(asyncio.DatagramProtocol):
+    def __init__(self, port):
+        self.port = port
+
+    def connection_made(self, transport):
+        RELAY.sockets[self.port] = transport
+
+    def datagram_received(self, data, addr):
+        RELAY.received(self.port, data, addr)
+
+
 async def handle_qos_http(reader, writer):
     """DirtySDK QoS coordinator served over TCP on the UDP probe port."""
     peer = writer.get_extra_info("peername")
@@ -3783,6 +3864,12 @@ async def main():
     log.info("QoS HTTP coordinator listening on TCP port 17500")
 
     await loop.create_datagram_endpoint(lambda: QosUdpProtocol(), local_addr=("0.0.0.0", 17500))
+
+    global RELAY
+    RELAY = PeerRelay(RELAY_PORTS)
+    for port in RELAY_PORTS:
+        await loop.create_datagram_endpoint(lambda port=port: RelayProtocol(port), local_addr=("0.0.0.0", port))
+    log.info("Peer relay listening on UDP %d-%d", RELAY_PORTS[0], RELAY_PORTS[-1])
 
     async with blaze_server, https_server, autolog_server, qos_http_server:
         await asyncio.gather(

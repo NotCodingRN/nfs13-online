@@ -1020,6 +1020,55 @@ class GameManagerEncodingTests(unittest.TestCase):
         self.assertEqual(after_valid[2], 5)
         self.assertEqual(ok2[6:8], b"\x00\x00")
 
+    def test_relay_connects_two_players_behind_one_public_ip(self):
+        from unittest.mock import patch
+        ports = range(47000, 47004)
+        relay = server.PeerRelay(ports)
+
+        class Inbox(asyncio.DatagramProtocol):
+            def __init__(self): self.got = asyncio.Queue()
+            def datagram_received(self, data, addr): self.got.put_nowait((data, addr))
+
+        async def run_test():
+            loop = asyncio.get_running_loop()
+            for port in ports:
+                await loop.create_datagram_endpoint(lambda port=port: server.RelayProtocol(port),
+                                                    local_addr=("127.0.0.1", port))
+            # Both players come from one public IP, like two PCs on one VPN.
+            a_sock, a_in = await loop.create_datagram_endpoint(Inbox, local_addr=("127.0.0.1", 0))
+            b_sock, b_in = await loop.create_datagram_endpoint(Inbox, local_addr=("127.0.0.1", 0))
+            vpn_addr = server.make_network_address_field("ADDR")  # same address for both
+            host = server.ClientSession(FakeWriter(), ("127.0.0.1", 1), ("127.0.0.1", 5000),
+                                        server.PlayerProfile(1000001, 1000001, "A", ""), network_addr=vpn_addr)
+            joiner = server.ClientSession(FakeWriter(), ("127.0.0.1", 2), ("127.0.0.1", 5001),
+                                          server.PlayerProfile(1000002, 1000002, "B", ""), network_addr=vpn_addr)
+            server.ACTIVE_SESSIONS.update({1000001: host, 1000002: joiner})
+            game = server.create_game_record(host, b"\x00", connected_host=True)
+            server.add_session_to_game(game, joiner, b"\x00")
+            setup = server.make_game_setup_notification_payload(
+                game.request_payload, game.game_id, roster=list(game.members.values()),
+                recipient_id=1000002, game_record=game)
+            a_for_b = relay.pairs[(game.game_id, 1000002, 1000001)]  # where B sends to reach A
+            b_for_a = relay.port(game.game_id, 1000001, 1000002)
+            self.assertIn(server.tdf_int_field("PORT", a_for_b), setup)
+            self.assertIn(server.tdf_int_field("IP", 0x7F000001), setup)
+            relay.received(a_for_b, b"spoof", ("203.0.113.5", 9999))  # not B's IP: ignored
+            self.assertNotIn((game.game_id, 1000002), relay.endpoints)
+            b_sock.sendto(b"hello from B", ("127.0.0.1", a_for_b))  # A not known yet: dropped
+            await asyncio.sleep(0.05)
+            a_sock.sendto(b"hello from A", ("127.0.0.1", b_for_a))
+            got_b = await asyncio.wait_for(b_in.got.get(), 2)
+            b_sock.sendto(b"reply from B", ("127.0.0.1", a_for_b))
+            got_a = await asyncio.wait_for(a_in.got.get(), 2)
+            for t in [a_sock, b_sock, *relay.sockets.values()]: t.close()
+            return got_a, got_b, a_for_b, b_for_a
+
+        with patch.object(server, "RELAY", relay), patch.object(server, "SERVER_HOST", "127.0.0.1"):
+            got_a, got_b, a_for_b, b_for_a = asyncio.run(run_test())
+        # Each player hears the other from exactly the address it was told to use.
+        self.assertEqual(got_b, (b"hello from A", ("127.0.0.1", a_for_b)))
+        self.assertEqual(got_a, (b"reply from B", ("127.0.0.1", b_for_a)))
+
     def test_explicit_host_migration_changes_setup_host(self):
         async def run_test():
             host_writer = FakeWriter()

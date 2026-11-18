@@ -17,6 +17,10 @@ from pathlib import Path
 from ui import DATA, ROOT
 
 DATA_FILES = {"players.json", "license_plates.json", "friends.json", "accounts.json"}
+# Blaze, HTTPS, Autolog, QoS, and the UDP relay range in server.RELAY_PORTS.
+GAME_PORTS = [{"fromPort": first, "toPort": last, "protocol": protocol, "cidrs": ["0.0.0.0/0"]}
+              for first, last, protocol in ((42127, 42127, "tcp"), (44125, 44125, "tcp"), (8080, 8080, "tcp"),
+                                            (17500, 17500, "tcp"), (17500, 17500, "udp"), (3700, 3899, "udp"))]
 
 
 def aws_executable():
@@ -279,10 +283,8 @@ class Cloud:
         static_name = self.instance_name + "-ip"
         self.aws("lightsail", "allocate-static-ip", "--static-ip-name", static_name)
         self.aws("lightsail", "attach-static-ip", "--static-ip-name", static_name, "--instance-name", self.instance_name)
-        ports = [{"fromPort": port, "toPort": port, "protocol": protocol, "cidrs": ["0.0.0.0/0"]}
-                 for port, protocol in ((42127, "tcp"), (44125, "tcp"), (8080, "tcp"), (17500, "tcp"), (17500, "udp"))]
         self.aws("lightsail", "put-instance-public-ports", "--instance-name", self.instance_name,
-                 "--port-infos", json.dumps(ports))
+                 "--port-infos", json.dumps(GAME_PORTS))
         self.provision(report)
         if restore_file:
             report("Restoring your server data…")
@@ -314,9 +316,7 @@ class Cloud:
             self.aws("lightsail", "allocate-static-ip", "--static-ip-name", name)
         if not address or not address.get("isAttached"):
             self.aws("lightsail", "attach-static-ip", "--static-ip-name", name, "--instance-name", self.instance_name)
-        ports = [{"fromPort": p, "toPort": p, "protocol": protocol, "cidrs": ["0.0.0.0/0"]}
-                 for p, protocol in ((42127,"tcp"),(44125,"tcp"),(8080,"tcp"),(17500,"tcp"),(17500,"udp"))]
-        self.aws("lightsail", "put-instance-public-ports", "--instance-name", self.instance_name, "--port-infos", json.dumps(ports))
+        self.aws("lightsail", "put-instance-public-ports", "--instance-name", self.instance_name, "--port-infos", json.dumps(GAME_PORTS))
         self.provision(report)
         if record.get("restore_file"):
             self.restore(record["restore_file"])

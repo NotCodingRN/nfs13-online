@@ -104,7 +104,7 @@ cd nfs13-online
 ./install/install_server.sh 192.168.1.50      # the IP players use to reach the server
 ```
 
-Then open TCP 42127, 44125, 8080, 17500 and UDP 17500. Watch it live with
+Then open TCP 42127, 44125, 8080, 17500 and UDP 17500 and 3700-3899 (the peer relay). Watch it live with
 `journalctl --user -u nfs13-server.service -f -o cat`.
 
 ## Manual client setup

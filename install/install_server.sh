@@ -81,7 +81,7 @@ loginctl enable-linger "$USER" 2>/dev/null || true
 cat <<EOF
 
 Server installed in $DEST and started.
-Open TCP 42127, 44125, 8080, 17500 and UDP 17500 on this machine.
+Open TCP 42127, 44125, 8080, 17500 and UDP 17500, 3700-3899 on this machine.
 Players point these names at $HOST_IP (hosts file or local DNS):
 $(sed 's/^/  /' "$REPO/client/hosts.txt")
 
