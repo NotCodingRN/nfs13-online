@@ -369,6 +369,9 @@ class Cloud:
         folder = DATA / "Backups"
         folder.mkdir(parents=True, exist_ok=True)
         self.save(folder / f"before-update-{time.time_ns()}.tar.gz")
+        # Servers made before the relay need its UDP range open; this call only adds rules.
+        self.aws("lightsail", "open-instance-public-ports", "--instance-name", self.instance_name,
+                 "--port-info", json.dumps(GAME_PORTS[-1], separators=(",", ":")))
         source = {name: base64.b64encode((ROOT / "server" / name).read_bytes()).decode()
                   for name in ("server.py", "admin_api.py")}
         script = ("import base64,subprocess\nfrom pathlib import Path\n"
